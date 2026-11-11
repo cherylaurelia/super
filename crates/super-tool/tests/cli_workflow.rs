@@ -126,6 +126,36 @@ fn csharp_empty_interpolation_does_not_block_repository_checks() {
 }
 
 #[test]
+fn unparseable_files_without_supertests_do_not_block_repository_checks() {
+    let files = [("test.py", SOURCE), ("template.py", "def {{ name }}(:\n")];
+    let fixture = Fixture::with_files(false, false, &files, |_| {});
+    let output = fixture.run(&["check", ".", "--detach", "--json"]);
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        fixture.service.submissions.lock().unwrap()[0]["supertests"],
+        json!([{"path": "test.py", "name": "law", "language": "python", "line": 3}])
+    );
+    let output = fixture.run(&["check", "template.py", "--detach", "--json"]);
+    assert!(!output.status.success(), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("could not parse `template.py`"),
+        "{output:?}"
+    );
+}
+
+#[test]
+fn unparseable_files_with_supertests_still_report_syntax_errors() {
+    let broken = "from schematic import *\n\n@supertest\ndef law(:\n";
+    let fixture = Fixture::with_files(false, false, &[("test.py", SOURCE), ("broken.py", broken)], |_| {});
+    let output = fixture.run(&["check", ".", "--detach", "--json"]);
+    assert!(!output.status.success(), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("could not parse `broken.py`"),
+        "{output:?}"
+    );
+}
+
+#[test]
 fn new_language_discovery_respects_exclusions_and_rejects_ambiguous_names() {
     for &(file, source, _, name, _) in LANGUAGE_EXAMPLES {
         let path = format!("supertests/{file}");

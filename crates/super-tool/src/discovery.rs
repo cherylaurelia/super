@@ -134,7 +134,11 @@ pub fn discover(
             continue;
         }
         let language = supported_language(&file).expect("candidate language");
-        let source = repository.file_at_commit(commit_oid, &file)?;
+        let bytes = repository.file_bytes_at_commit(commit_oid, &file)?;
+        if !is_file && !may_declare_supertests(&bytes) {
+            continue;
+        }
+        let source = String::from_utf8(bytes).with_context(|| format!("could not read `{file}` as UTF-8"))?;
         let declarations = parse_declarations(language, &source)
             .with_context(|| format!("could not parse `{file}` for supertests"))?;
         let mut names = HashSet::new();
@@ -168,6 +172,13 @@ pub fn discover(
         supertests,
         excluded,
     })
+}
+
+/// Every declaration form names `supertest`, so other files must not block a directory check.
+/// New declaration forms must keep that word. NUL bytes suggest UTF-16, where this search can't
+/// see a declaration, so those are still read.
+fn may_declare_supertests(source: &[u8]) -> bool {
+    source.contains(&0) || source.windows(9).any(|word| word.eq_ignore_ascii_case(b"supertest"))
 }
 
 fn split_selector(selector: &str) -> Result<(&str, Option<&str>)> {
@@ -597,5 +608,47 @@ const char *example = "SUPERTEST void not_real(void) {}";
             .unwrap(),
             PathBuf::from("supertests/missing.py")
         );
+    }
+
+    fn discover_committed(files: &[(&str, &[u8])]) -> Result<Discovery> {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let git = |args: &[&str]| {
+            let status = std::process::Command::new("git").args(args).current_dir(&root).status();
+            assert!(status.unwrap().success());
+        };
+        git(&["init", "-q"]);
+        for (path, source) in files {
+            std::fs::write(root.join(path), source).unwrap();
+        }
+        git(&["add", "."]);
+        git(&[
+            "-c",
+            "user.name=T",
+            "-c",
+            "user.email=t@example.com",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-qm",
+            "Base",
+        ]);
+        let repository = GitRepository::discover(&root).unwrap();
+        let head = repository.resolve_commit("HEAD").unwrap();
+        discover(&repository, &head.oid, &root, ".", false)
+    }
+
+    #[test]
+    fn non_utf8_files_without_supertests_do_not_block_discovery() {
+        let law = b"from schematic import *\n\n@supertest\ndef law():\n    pass\n";
+        let discovery = discover_committed(&[("law.py", law), ("latin1.c", b"/* caf\xe9 */\n")]).unwrap();
+        assert_eq!(discovery.supertests.len(), 1);
+    }
+
+    #[test]
+    fn utf16_files_are_reported_instead_of_skipped() {
+        let utf16: Vec<u8> = "[Supertest]".encode_utf16().flat_map(u16::to_le_bytes).collect();
+        let error = discover_committed(&[("Law.cs", &utf16)]).unwrap_err();
+        assert!(format!("{error:#}").contains("`Law.cs`"), "{error:#}");
     }
 }
